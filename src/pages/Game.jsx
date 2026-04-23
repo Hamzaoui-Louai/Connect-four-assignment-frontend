@@ -1,7 +1,53 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import PlayerGameCard from "../components/PlayerGameCard";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
+import { createGameSocket } from "../api/gameSocket";
+
+function hasWinner(grid, token) {
+  const directions = [
+    [1, 0],
+    [0, 1],
+    [1, 1],
+    [1, -1],
+  ];
+
+  for (let row = 0; row < grid.length; row++) {
+    for (let col = 0; col < grid[row].length; col++) {
+      if (grid[row][col] !== token) {
+        continue;
+      }
+
+      for (const [dr, dc] of directions) {
+        let streak = 1;
+
+        for (let step = 1; step < 4; step++) {
+          const nextRow = row + dr * step;
+          const nextCol = col + dc * step;
+
+          if (
+            nextRow < 0 ||
+            nextRow >= grid.length ||
+            nextCol < 0 ||
+            nextCol >= grid[row].length ||
+            grid[nextRow][nextCol] !== token
+          ) {
+            break;
+          }
+
+          streak++;
+        }
+
+        if (streak === 4) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
 
 function ConnectFourBoard() {
   return (
@@ -124,31 +170,132 @@ function ConnectFourClickable({play1, play2, play3, play4, play5, play6, play7})
 }
 
 function Game() {
-    const [grid, setGrid] = useState([[0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0]]); // 6 rows, 7 columns
-    const [isPlayerTurn, setIsPlayerTurn] = useState(true);
+  const navigate = useNavigate();
+  const [grid, setGrid] = useState([[0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0], [0,0,0,0,0,0,0]]); // 6 rows, 7 columns
+  const [isPlayerTurn, setIsPlayerTurn] = useState(true);
+  const [isGameOver, setIsGameOver] = useState(false);
+  const socketRef = useRef(null);
+  const gameOverRef = useRef(false);
 
-    function playMove(col) {
+  const finishGame = (winnerLabel) => {
+    if (gameOverRef.current) {
+      return;
+    }
+
+    gameOverRef.current = true;
+    setIsGameOver(true);
+    setIsPlayerTurn(false);
+    socketRef.current?.cancelReminder();
+
+    toast.success(`${winnerLabel} wins!`, {
+      autoClose: 2200,
+      onClose: () => {
+        navigate("/");
+      },
+    });
+  };
+
+  useEffect(() => {
+    const socketClient = createGameSocket({
+      onOpen: () => {
+        toast.success("Connected to game server.");
+      },
+      onClose: () => {
+        toast.info("Disconnected from game server.");
+      },
+      onError: () => {
+        toast.error("Socket error while syncing game.");
+      },
+      onMessage: (message) => {
+        if (gameOverRef.current) {
+          return;
+        }
+
+        if (!message || typeof message !== "object") {
+          return;
+        }
+
+        if (message.counter === 2 && Array.isArray(message.grid)) {
+          socketRef.current?.cancelReminder();
+          setGrid(message.grid);
+
+          if (hasWinner(message.grid, 1)) {
+            finishGame("Bot");
+            return;
+          }
+
+          setIsPlayerTurn(true);
+        }
+      },
+    });
+
+    socketRef.current = socketClient;
+    socketClient.connect();
+
+    return () => {
+      socketClient.disconnect();
+      socketRef.current = null;
+    };
+  }, []);
+
+  function playMove(col) {
+      if (isGameOver || gameOverRef.current) {
+        return;
+      }
+
+      if (!isPlayerTurn) {
+        toast.info("It's not your turn!");
+        return;
+      }
+
         const colIndex = col - 1;
         
         if (colIndex < 0 || colIndex > 6) {
           throw new Error(`Invalid column ${col}. Column must be between 1 and 7.`);
         }
-    
-        setIsPlayerTurn(false);
-        setGrid((prevGrid) => {
-          const nextGrid = prevGrid.map((row) => [...row]);
-        
-          for (let rowIndex = 0; rowIndex < nextGrid.length; rowIndex++) {
-            if (nextGrid[rowIndex][colIndex] === 0) {
-              nextGrid[rowIndex][colIndex] = 2;
-              return nextGrid;
-            }
-          }
 
-          toast.error(`Column ${col} is full.`);
-          return prevGrid;
-    });
-    }
+        const nextGrid = grid.map((row) => [...row]);
+        let placed = false;
+
+        for (let rowIndex = 0; rowIndex < nextGrid.length; rowIndex++) {
+            if (nextGrid[rowIndex][colIndex] === 0) {
+                nextGrid[rowIndex][colIndex] = 2;
+                placed = true;
+                break;
+            }
+        }
+
+        if (!placed) {
+            toast.error(`Column ${col} is full.`);
+            return;
+        }
+
+        setGrid(nextGrid);
+
+        if (hasWinner(nextGrid, 2)) {
+          finishGame("Player");
+          return;
+        }
+
+        setIsPlayerTurn(false);
+
+        const payload = { grid: nextGrid, counter: 1 };
+        const sent = socketRef.current?.sendGridUpdate(payload);
+
+        if (!sent) {
+            toast.error("Unable to send move. Socket is not connected.");
+          setIsPlayerTurn(true);
+            return;
+        }
+
+        socketRef.current?.scheduleReminder({
+            ...payload,
+            delayMs: 4000,
+            onReminderSent: () => {
+                toast.info("Reminder sent to server.");
+            },
+        });
+        }
 
     return (
     <main className="absolute left-0 top-0 flex h-screen w-screen items-center justify-center p-4 backdrop-blur-sm">
@@ -160,13 +307,13 @@ function Game() {
 	    	    <ConnectFourBoard />
                 <ConnectFourGrid grid={grid} />
                 <ConnectFourClickable 
-                    play1={()=>{if (isPlayerTurn) playMove(1);else toast.info("It's not your turn!");}}
-                    play2={()=>{if (isPlayerTurn) playMove(2);else toast.info("It's not your turn!");}}
-                    play3={()=>{if (isPlayerTurn) playMove(3);else toast.info("It's not your turn!");}}
-                    play4={()=>{if (isPlayerTurn) playMove(4);else toast.info("It's not your turn!");}}
-                    play5={()=>{if (isPlayerTurn) playMove(5);else toast.info("It's not your turn!");}}
-                    play6={()=>{if (isPlayerTurn) playMove(6);else toast.info("It's not your turn!");}}
-                    play7={()=>{if (isPlayerTurn) playMove(7);else toast.info("It's not your turn!");}}
+                    play1={() => playMove(1)}
+                    play2={() => playMove(2)}
+                    play3={() => playMove(3)}
+                    play4={() => playMove(4)}
+                    play5={() => playMove(5)}
+                    play6={() => playMove(6)}
+                    play7={() => playMove(7)}
                 />
 	        </section>
         </div>
